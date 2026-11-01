@@ -1,0 +1,12 @@
+node_modules/
+dist/
+apk-build/
+upstream/
+*.apk
+*.keystore
+*.jks
+*.pem
+*.der
+.DS_Store
+.env
+.env.*

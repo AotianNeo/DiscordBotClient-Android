@@ -1,0 +1,108 @@
+name: Build DiscordBotClient Android
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Test, Bundle Hermes v98 & Package Standalone APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python cryptography dependency
+        run: pip install cryptography
+
+      - name: Setup Java 17 (for apksigner verification)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install JS/TS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run protocol & store unit tests
+        run: bun test
+
+      - name: Compile Hermes v98 bytecode bundle & Revenge plugin
+        run: |
+          chmod +x ./node_modules/@unbound-app/hermesc/linux/hermesc
+          bun run build
+          cd dist/plugin && zip -r ../revenge-botclient-plugin.zip .
+
+      - name: Download & verify base Discord Android v351011 splits
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p apk-build/orig-splits
+          gh release download discord-base-351011 \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "discord-351011-orig-splits.zip" \
+            --dir apk-build \
+          || gh release download discord-base-351011 \
+            --repo "AotianNeo/DiscordBotClient-Android" \
+            --pattern "discord-351011-orig-splits.zip" \
+            --dir apk-build
+          echo "324d577dab5c126b4a8823584ad1474260a9e1473331e6e82048900a4d84596a  apk-build/discord-351011-orig-splits.zip" | sha256sum -c -
+          unzip -q apk-build/discord-351011-orig-splits.zip -d apk-build/orig-splits
+
+      - name: Build standalone single-file DiscordBotClient-Android.apk
+        run: python3 scripts/build_standalone_discord_apk.py
+
+      - name: Verify 16 KB page alignment & APK Signature Scheme v2
+        run: |
+          BT_DIR="$(ls -d "${ANDROID_HOME}/build-tools/"* | sort -V | tail -n 1)"
+          echo "Using Android SDK Build-Tools: ${BT_DIR}"
+          "${BT_DIR}/zipalign" -c -P 16 4 dist/DiscordBotClient-Android.apk
+          "${BT_DIR}/apksigner" verify --verbose --print-certs dist/DiscordBotClient-Android.apk
+          cd dist
+          sha256sum DiscordBotClient-Android.apk revenge.bundle revenge.min.js revenge-botclient-plugin.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Upload CI build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: DiscordBotClient-Android-Build
+          if-no-files-found: error
+          path: |
+            dist/DiscordBotClient-Android.apk
+            dist/revenge.bundle
+            dist/revenge.min.js
+            dist/revenge-botclient-plugin.zip
+            dist/SHA256SUMS.txt
+
+      - name: Publish GitHub Release on version tags
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/DiscordBotClient-Android.apk
+            dist/revenge.bundle
+            dist/revenge.min.js
+            dist/revenge-botclient-plugin.zip
+            dist/SHA256SUMS.txt
