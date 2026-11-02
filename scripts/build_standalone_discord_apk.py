@@ -272,17 +272,65 @@ def parse_utf16_axml_string_pool(buf: bytes, off: int) -> list[str]:
     return out
 
 
+def build_utf16_string_pool(strings: list[str]) -> bytes:
+    offsets = []
+    blob = bytearray()
+    for s in strings:
+        offsets.append(len(blob))
+        u16_bytes = s.encode("utf-16-le")
+        u16_len = len(u16_bytes) // 2
+        if u16_len > 0x7FFF:
+            blob.extend(struct.pack("<HH", ((u16_len >> 16) & 0x7FFF) | 0x8000, u16_len & 0xFFFF))
+        else:
+            blob.extend(struct.pack("<H", u16_len))
+        blob.extend(u16_bytes)
+        blob.extend(b"\x00\x00")
+
+    while len(blob) % 4 != 0:
+        blob.append(0)
+
+    header_sz = 28
+    strings_start = header_sz + 4 * len(strings)
+    chunk_sz = strings_start + len(blob)
+    out = bytearray(struct.pack("<HHIIIIII", 0x0001, header_sz, chunk_sz, len(strings), 0, 0, strings_start, 0))
+    for off in offsets:
+        out.extend(struct.pack("<I", off))
+    out.extend(blob)
+    return bytes(out)
+
+
 def patch_android_manifest_axml(axml: bytes) -> bytes:
     """
-    Strips split-APK enforcement attributes and Play split metadata from binary
-    `AndroidManifest.xml` so Android PackageManager installs the merged APK
-    cleanly as a standalone single APK.
+    1. Rebrands package ID from `com.discord` to `com.discord.botclient`, renames
+       all global permissions, ContentProvider authorities, and taskAffinities
+       from `com.discord.*` to `com.discord.botclient.*`, and sets the app
+       display label to `DiscordBotClient` so it installs and runs side-by-side
+       with the official Discord app without any conflict.
+    2. Strips split-APK enforcement attributes and Play split metadata from binary
+       `AndroidManifest.xml` so Android PackageManager installs the merged APK
+       cleanly as a standalone single APK.
     """
     xml_type, xml_hsz, xml_sz = struct.unpack_from("<HHI", axml, 0)
     assert xml_type == 0x0003 and xml_hsz == 8
 
     strings: list[str] = []
     res_ids: list[int] = []
+    app_label_idx: int = -1
+
+    MANIFEST_STRING_REPLACEMENTS = {
+        "com.discord": "com.discord.botclient",
+        "com.discord.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION": "com.discord.botclient.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
+        "com.discord.SentryInitProvider": "com.discord.botclient.SentryInitProvider",
+        "com.discord.SentryPerformanceProvider": "com.discord.botclient.SentryPerformanceProvider",
+        "com.discord.androidx-startup": "com.discord.botclient.androidx-startup",
+        "com.discord.custom_tab_host": "com.discord.botclient.custom_tab_host",
+        "com.discord.file-provider": "com.discord.botclient.file-provider",
+        "com.discord.fileprovider": "com.discord.botclient.fileprovider",
+        "com.discord.firebaseinitprovider": "com.discord.botclient.firebaseinitprovider",
+        "com.discord.imagepickerprovider": "com.discord.botclient.imagepickerprovider",
+        "com.discord.provider": "com.discord.botclient.provider",
+        "com.discord.share": "com.discord.botclient.share",
+    }
 
     STRIP_MANIFEST_RES_IDS = {
         0x01010591,  # android:isSplitRequired
@@ -310,8 +358,11 @@ def patch_android_manifest_axml(axml: bytes) -> bytes:
         pos += csz
 
         if ct == 0x0001:  # RES_STRING_POOL_TYPE
-            strings = parse_utf16_axml_string_pool(chunk, 0)
-            out_chunks.extend(chunk)
+            orig_strings = parse_utf16_axml_string_pool(chunk, 0)
+            strings = [MANIFEST_STRING_REPLACEMENTS.get(s, s) for s in orig_strings]
+            app_label_idx = len(strings)
+            strings.append("DiscordBotClient")
+            out_chunks.extend(build_utf16_string_pool(strings))
         elif ct == 0x0180:  # RES_XML_RESOURCE_MAP_TYPE
             cnt = (csz - chsz) // 4
             res_ids = [struct.unpack_from("<I", chunk, chsz + i * 4)[0] for i in range(cnt)]
@@ -322,18 +373,34 @@ def patch_android_manifest_axml(axml: bytes) -> bytes:
             )
             elem_name = strings[name_idx] if 0 <= name_idx < len(strings) else ""
 
-            if elem_name in ("manifest", "application"):
+            if elem_name in ("manifest", "application", "activity", "activity-alias"):
                 kept_attrs = []
                 attrs_base = 16 + attr_start
                 for ai in range(attr_count):
                     a_off = attrs_base + ai * attr_size
-                    attr_bytes = chunk[a_off : a_off + attr_size]
-                    _, a_name_idx, _, _, _, _, _ = struct.unpack_from("<iiiHBBI", attr_bytes, 0)
+                    attr_bytes = bytearray(chunk[a_off : a_off + attr_size])
+                    a_ns_idx, a_name_idx, _, a_tsize, a_res0, _, _ = struct.unpack_from("<iiiHBBI", attr_bytes, 0)
                     a_name = strings[a_name_idx] if 0 <= a_name_idx < len(strings) else ""
                     a_res = res_ids[a_name_idx] if 0 <= a_name_idx < len(res_ids) else 0
-                    if a_res in STRIP_MANIFEST_RES_IDS or a_name in STRIP_MANIFEST_ATTR_NAMES:
+                    if elem_name in ("manifest", "application") and (
+                        a_res in STRIP_MANIFEST_RES_IDS or a_name in STRIP_MANIFEST_ATTR_NAMES
+                    ):
                         continue
-                    kept_attrs.append(attr_bytes)
+                    # Override android:label (0x01010001) to "DiscordBotClient" on <application>, <activity>, <activity-alias>
+                    if a_res == 0x01010001 and app_label_idx >= 0:
+                        struct.pack_into(
+                            "<iiiHBBI",
+                            attr_bytes,
+                            0,
+                            a_ns_idx,
+                            a_name_idx,
+                            app_label_idx,
+                            a_tsize,
+                            a_res0,
+                            0x03,  # TYPE_STRING
+                            app_label_idx,
+                        )
+                    kept_attrs.append(bytes(attr_bytes))
 
                 new_chunk_sz = 16 + attr_start + len(kept_attrs) * attr_size
                 new_elem = bytearray(chunk[: 16 + attr_start])
@@ -575,6 +642,8 @@ def merge_resources_arsc(base_arsc: bytes, split_arscs: list[bytes]) -> bytes:
         pkg_body.extend(oc)
 
     total_pkg_sz = len(pkg_header) + len(pkg_body)
+    pkg_name_u16 = "com.discord.botclient".encode("utf-16-le").ljust(256, b"\x00")
+    pkg_header[12:268] = pkg_name_u16
     struct.pack_into("<I", pkg_header, 4, total_pkg_sz)
     struct.pack_into("<IIII", pkg_header, 268, ts_rel_off, last_pub_t, ks_rel_off, len(k_strings))
 
@@ -829,7 +898,15 @@ def main() -> None:
                 write_entry(z_out, info.filename, z_xx.read(info.filename), ctype)
 
     # Validate merged APK with aapt2 dump badging and xmltree
-    subprocess.run([str(aapt2), "dump", "badging", str(unaligned_apk)], check=True, stdout=subprocess.PIPE)
+    badging_dump = subprocess.run(
+        [str(aapt2), "dump", "badging", str(unaligned_apk)],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+        errors="replace",
+    )
+    assert "package: name='com.discord.botclient'" in badging_dump.stdout
+    assert "application-label:'DiscordBotClient'" in badging_dump.stdout
     xml_dump = subprocess.run(
         [str(aapt2), "dump", "xmltree", str(unaligned_apk), "--file", "AndroidManifest.xml"],
         check=True,
@@ -839,6 +916,7 @@ def main() -> None:
     )
     assert "requiredSplitTypes" not in xml_dump.stdout
     assert "com.android.vending.splits.required" not in xml_dump.stdout
+    assert 'package="com.discord.botclient"' in xml_dump.stdout
     print(f"      Verified merged APK manifest & resources with aapt2 ({unaligned_apk.stat().st_size:,} bytes)")
 
     print("[5/5] Aligning (16 KB page alignment) and signing (APK Signature Scheme v2)...")

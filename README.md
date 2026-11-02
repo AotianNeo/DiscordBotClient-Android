@@ -5,9 +5,9 @@
 [![Discord Android](https://img.shields.io/badge/Discord%20Android-351.11%20(351011)-5865F2.svg)](https://github.com/AotianNeo/DiscordBotClient-Android/releases)
 [![Hermes Bytecode](https://img.shields.io/badge/Hermes%20Bytecode-v98-orange.svg)](https://github.com/AotianNeo/DiscordBotClient-Android)
 
-A **100% standalone single-APK Discord Bot Client for Android**, bringing the protocol translation architecture of [`aiko-chan-ai/DiscordBotClient`](https://github.com/aiko-chan-ai/DiscordBotClient) directly inside the **complete official native Discord Android client** (`com.discord` v351.11 / build `351011`), powered by [`revenge-mod`](https://github.com/revenge-mod).
+A **100% standalone single-APK Discord Bot Client for Android**, bringing the protocol translation architecture of [`aiko-chan-ai/DiscordBotClient`](https://github.com/aiko-chan-ai/DiscordBotClient) directly inside the **complete official native Discord Android client** (`351.11` / build `351011`), powered by [`revenge-mod`](https://github.com/revenge-mod).
 
-Install the single `.apk`, open Discord, paste your **Bot Token**, and use the full native React Native mobile interface as a Discord Bot — **no Root, no Xposed/LSPatch, no Frida, and no external proxy servers required**.
+Packaged under the independent application ID **`com.discord.botclient`** (**DiscordBotClient**), it installs and runs **side-by-side alongside the official `com.discord` app** with zero package, permission, or ContentProvider conflicts — **no Root, no Xposed/LSPatch, no Frida, and no external proxy servers required**.
 
 ---
 
@@ -57,7 +57,7 @@ Install the single `.apk`, open Discord, paste your **Bot Token**, and use the f
 
 ```mermaid
 flowchart TD
-    APK["Standalone DiscordBotClient-Android.apk (com.discord v351.11)"] --> DEX["Patched classes3.dex: ReactInstance.loadJSBundle"]
+    APK["Standalone DiscordBotClient-Android.apk (com.discord.botclient v351.11)"] --> DEX["Patched classes3.dex: ReactInstance.loadJSBundle"]
     DEX -->|"1. Loads assets://bundle first"| REV["Hermes v98 Bytecode: Revenge + DiscordBotClient"]
     DEX -->|"2. Loads index.android.bundle"| RN["Official Discord React Native Bundle"]
 
@@ -80,8 +80,8 @@ flowchart TD
 Official Discord Android (`351.11` / `versionCode 351011`) ships as 4 Google Play Split APKs (`base.apk`, `split_config.arm64_v8a.apk`, `split_config.xxhdpi.apk`, `split_config.en.apk`). [`scripts/build_standalone_discord_apk.py`](./scripts/build_standalone_discord_apk.py) fuses them into a single self-contained APK without `apktool` YAML round-trip corruption:
 
 1. **In-Place Dalvik Bytecode Patch (`classes3.dex`)**: Patches `com.facebook.react.runtime.ReactInstance.loadJSBundle(JSBundleLoader)` in-place (`insns_size = 27` 16-bit code units preserved, zero string/type/method offset shifts) to invoke `this.loadJSBundleFromAssets(this.context.getAssets(), "assets://bundle")` right before Discord's main bundle loader, verified via Android SDK `dexdump`.
-2. **Binary AXML Manifest Patch (`AndroidManifest.xml`)**: Strips `android:isSplitRequired`, `android:requiredSplitTypes`, `android:splitTypes`, and `com.android.vending.splits*` `<meta-data>` chunks directly at the binary chunk level so Android `PackageManager` installs the single APK cleanly.
-3. **Binary Resource Table Merger (`resources.arsc`)**: Merges `split_config.xxhdpi.apk` and `split_config.en.apk` `ResTable_type` chunks and global/key string pools into `base.apk`'s `resources.arsc`, verified via `aapt2 dump badging` and `aapt2 dump xmltree`.
+2. **Binary AXML Manifest Rebranding & Split Removal (`AndroidManifest.xml`)**: Rebrands `<manifest package>` from `com.discord` to `com.discord.botclient`, rewrites all global `<permission>`, `<uses-permission>`, `<provider android:authorities>`, and `android:taskAffinity` strings to `com.discord.botclient.*`, sets the application display label to `DiscordBotClient`, and strips `android:isSplitRequired`, `android:requiredSplitTypes`, `android:splitTypes`, and `com.android.vending.splits*` `<meta-data>` chunks directly at the binary chunk level so it installs side-by-side alongside the official `com.discord` app.
+3. **Binary Resource Table Merger & Package Remapping (`resources.arsc`)**: Merges `split_config.xxhdpi.apk` and `split_config.en.apk` `ResTable_type` chunks and global/key string pools into `base.apk`'s `resources.arsc`, and updates `ResTable_package.name` to `com.discord.botclient` so runtime `Resources.getIdentifier(..., context.getPackageName())` lookups resolve seamlessly, verified via `aapt2 dump badging` and `aapt2 dump xmltree`.
 4. **16 KB Page Alignment & APK Signature Scheme v2**: Embeds `dist/revenge.bundle` as `assets/bundle`, stores `arm64-v8a` native `.so` libraries uncompressed (`ZIP_STORED`), aligns to 16 KB page boundaries (`zipalign -P 16 4`), and signs with APK Signature Scheme v2.
 
 ---
@@ -91,12 +91,11 @@ Official Discord Android (`351.11` / `versionCode 351011`) ships as 4 Google Pla
 ### Option 1: Install Pre-Built Standalone APK (Recommended)
 
 1. Download **`DiscordBotClient-Android.apk`** from the [latest GitHub Release](https://github.com/AotianNeo/DiscordBotClient-Android/releases).
-2. If you already have the official `com.discord` app installed, uninstall it first (signature differs from Google Play).
-3. Install `DiscordBotClient-Android.apk` on any `arm64-v8a` Android 8.0+ device or emulator:
+2. Install `DiscordBotClient-Android.apk` on any `arm64-v8a` Android 8.0+ device or emulator — **no need to uninstall the official `com.discord` app** (both coexist side-by-side):
    ```bash
    adb install DiscordBotClient-Android.apk
    ```
-4. Launch **Discord**, paste your **Discord Bot Token** into the **DiscordBotClient** modal, and tap **Login with Bot Token**.
+3. Launch **DiscordBotClient**, paste your **Discord Bot Token** into the **DiscordBotClient** modal, and tap **Login with Bot Token**.
 
 > **Tip**: Enable **Presence Intent**, **Server Members Intent**, and **Message Content Intent** for your Bot in the [Discord Developer Portal](https://discord.com/developers/applications) so full guild member lists and message bodies are delivered by the Gateway.
 
